@@ -1,77 +1,36 @@
-import { openai } from "@ai-sdk/openai";
-import { google } from "@ai-sdk/google";
-import { anthropic } from "@ai-sdk/anthropic";
-import { generateText } from "ai";
+import { GoogleGenAI } from "@google/genai";
 
 import { hatchet } from "../hatchet";
-import { ParentCondition } from "@hatchet-dev/typescript-sdk/v1/conditions/parent-condition";
-
-export const models = {
-	"openai/gpt-4.1": openai("gpt-4.1"),
-	"openai/gpt-4o": openai("gpt-4o"),
-	"openai/o3": openai("o3"),
-	"openai/o3-mini-high": openai("o3-mini-high"),
-	"openai/o4-mini-high": openai("o4-mini-high"),
-	"google/gemini-2.5-flash": google("gemini-2.5-flash"),
-	"google/gemini-2.5-pro": google("gemini-2.5-pro"),
-	"anthropic/claude-3.7-sonnet": anthropic("claude-3.7-sonnet"),
-} as const;
-
-export type LLMModel = keyof typeof models;
 
 export type LLMInput = {
-	model: LLMModel;
-
-	messages: {
-		role: "user" | "assistant" | "system";
-		content: string;
-		reasoning?: string;
-	}[];
+	model: string;
+	text: string;
 };
 
 export type LLMOutput = {
 	text: string;
 };
 
-// export const llm = hatchet.task<LLMInput, LLMOutput>({
-// 	name: "llm",
+export const llm = hatchet.task<LLMInput, LLMOutput>({
+	name: "llm",
 
-// 	fn: async (input) => {
-// 		const model = models[input.model];
+	fn: async (input: LLMInput, ctx) => {
+		const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// 		const output = await generateText({
-// 			model,
-// 			messages: input.messages,
-// 		});
+		const output = await ai.models.generateContent({
+			model: input.model,
 
-// 		return {
-// 			text: output.text,
-// 		};
-// 	},
-// });
+			contents: [
+				{
+					parts: [{ text: input.text }],
+				},
+			],
+		});
 
-export const llm = hatchet.workflow<LLMInput, LLMOutput>({ name: "llm" });
+		// TODO: function calls
 
-const llmCacheRead = llm.task<LLMInput, LLMOutput>({
-	name: "llm-cache-read",
-	fn: async (input) => {
-		return { text: "Hello, world!" };
-	},
-});
-
-const llmRequest = llm.task<LLMInput, LLMOutput>({
-	name: "llm-request",
-	parents: [llmCacheRead],
-	skipIf: [new ParentCondition(llmCacheRead, "text != ''")],
-	fn: async (input) => {
-		return { text: "Hello, world!" };
-	},
-});
-
-const llmCacheWrite = llm.task<LLMInput, LLMOutput>({
-	name: "llm-cache-write",
-	parents: [llmRequest],
-	fn: async (input) => {
-		return { text: "Hello, world!" };
+		return {
+			text: output.text as string,
+		};
 	},
 });
