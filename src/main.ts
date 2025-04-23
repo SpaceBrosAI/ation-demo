@@ -12,10 +12,16 @@ import {
 	getStats,
 	copy,
 } from "./workflows/filesystem";
+import {
+	createContainer,
+	runCommandInContainer,
+	removeContainer,
+} from "./workflows/computer"; // Import computer tasks
 
 const worker = await hatchet.worker("worker", {
 	workflows: [
 		llm,
+		// Filesystem tasks
 		listDir,
 		readFileTask,
 		writeFileTask,
@@ -26,6 +32,10 @@ const worker = await hatchet.worker("worker", {
 		checkExists,
 		getStats,
 		copy,
+		// Computer (Docker) tasks
+		createContainer,
+		runCommandInContainer,
+		removeContainer,
 	],
 	slots: 100,
 });
