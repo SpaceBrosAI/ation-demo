@@ -1,3 +1,6 @@
+// Maybe some day officially in
+// https://googleapis.github.io/js-genai/main/functions/schema_helper.zodToGoogleGenAISchema.html
+
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { Schema } from "@google/genai";
