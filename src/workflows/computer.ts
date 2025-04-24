@@ -174,6 +174,12 @@ export const removeContainer = hatchet.task<
 		// Added explicit Promise return type
 		try {
 			const container = docker.getContainer(CONTAINER_NAME); // Use fixed name
+			// Inspect and stop if running
+			const info = await container.inspect();
+			if (info.State.Running) {
+				await container.stop();
+				console.log(`Container '${CONTAINER_NAME}' stopped before removal.`);
+			}
 			console.log(`Attempting to remove container '${CONTAINER_NAME}'...`);
 			await container.remove({
 				force: input.force,
