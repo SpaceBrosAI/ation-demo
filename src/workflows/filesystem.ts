@@ -14,8 +14,8 @@ import type { Stats } from "node:fs";
 
 import { z } from "zod";
 import type { FunctionDeclaration } from "@google/genai";
-import { hatchet } from "../hatchet";
 
+import { hatchet } from "../hatchet";
 import { zodToGoogleGenAISchema } from "../utils/google-genai-schema";
 
 // --- Zod Schemas ---

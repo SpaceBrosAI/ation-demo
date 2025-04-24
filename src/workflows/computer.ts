@@ -1,9 +1,9 @@
-import { Writable, PassThrough } from "node:stream"; // Ensure PassThrough is imported
+import { PassThrough } from "node:stream";
 
 import { z } from "zod";
 import { zodToGoogleGenAISchema } from "../utils/google-genai-schema";
 import type { FunctionDeclaration } from "@google/genai";
-import type Docker from "dockerode"; // Ensure Dockerode types are available if needed
+import type Docker from "dockerode";
 
 import { docker } from "../docker";
 import { hatchet } from "../hatchet";
