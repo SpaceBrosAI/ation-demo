@@ -15,10 +15,6 @@ const CONTAINER_NAME = "container-name";
 // Schema for creating a container
 const CreateContainerInputSchema = z.object({
 	image: z.string().describe("The name of the Docker image to use."),
-	cmd: z
-		.array(z.string())
-		.optional()
-		.describe("Command to run in the container."),
 	hostConfig: z
 		.record(z.any())
 		.optional()
@@ -40,6 +36,10 @@ const RunCommandInputSchema = z.object({
 	cmd: z
 		.array(z.string())
 		.describe("The command and its arguments to execute."),
+	workingDir: z
+		.string()
+		.optional()
+		.describe("The working directory inside the container for the command."),
 	attachStdout: z
 		.boolean()
 		.optional()
@@ -120,7 +120,7 @@ export const createContainer = hatchet.task<
 			// Create the container if it didn't exist
 			const container = await docker.createContainer({
 				Image: input.image,
-				Cmd: input.cmd,
+				Cmd: ["tail", "-f", "/dev/null"], // Keep container running
 				name: CONTAINER_NAME, // Use the fixed name
 				HostConfig: input.hostConfig as Docker.HostConfig, // Cast needed as Zod schema is generic
 				AttachStdout: true, // Required for logs/exec
@@ -153,7 +153,7 @@ export const runCommandInContainer = hatchet.task<
 	z.infer<typeof RunCommandOutputSchema>
 >({
 	name: "run-command-in-container",
-	fn: async (input) => {
+	fn: async (input): Promise<z.infer<typeof RunCommandOutputSchema>> => {
 		try {
 			const container = docker.getContainer(CONTAINER_NAME); // Use fixed name
 			// Ensure container exists before trying to exec
@@ -175,14 +175,16 @@ export const runCommandInContainer = hatchet.task<
 
 			const exec = await container.exec({
 				Cmd: input.cmd,
+				WorkingDir: input.workingDir ?? "/",
 				AttachStdout: input.attachStdout,
 				AttachStderr: input.attachStderr,
 				Tty: input.tty,
 			});
 
+			// Start the exec process and get the stream
 			const stream = await exec.start({
 				hijack: true,
-				stdin: false, // Assuming no stdin interaction for now
+				stdin: false,
 				Tty: input.tty,
 			});
 
@@ -193,6 +195,7 @@ export const runCommandInContainer = hatchet.task<
 			// docker.modem.demuxStream is needed to separate stdout and stderr
 			// If Tty is true, the stream is not multiplexed.
 			if (input.tty) {
+				// For TTY streams, all output comes to stdout
 				stdout = await new Promise((resolve, reject) => {
 					let output = "";
 					stream.on("data", (chunk) => {
@@ -202,6 +205,7 @@ export const runCommandInContainer = hatchet.task<
 					stream.on("error", reject);
 				});
 			} else {
+				// For non-TTY streams, demux stdout and stderr
 				const outputs = await new Promise<{ stdout: string; stderr: string }>(
 					(resolve, reject) => {
 						let stdoutData = "";
@@ -223,17 +227,27 @@ export const runCommandInContainer = hatchet.task<
 
 						docker.modem.demuxStream(stream, stdoutStream, stderrStream);
 
-						stream.on("end", () =>
-							resolve({ stdout: stdoutData, stderr: stderrData }),
-						);
-						stream.on("error", reject);
+						// Handle stream events
+						stream.on("end", () => {
+							// Ensure writable streams are finished before resolving
+							stdoutStream.end();
+							stderrStream.end(() => {
+								resolve({ stdout: stdoutData, stderr: stderrData });
+							});
+						});
+						stream.on("error", (err) => {
+							stdoutStream.end();
+							stderrStream.end(() => {
+								reject(err);
+							});
+						});
 					},
 				);
 				stdout = outputs.stdout;
 				stderr = outputs.stderr;
 			}
 
-			// Get exit code
+			// Get exit code after stream has ended
 			const inspectResult = await exec.inspect();
 			const exitCode = inspectResult.ExitCode;
 
@@ -319,13 +333,13 @@ export const removeContainer = hatchet.task<
 export const computerTools: FunctionDeclaration[] = [
 	{
 		name: "create-docker-container",
-		description: `Ensures the specific Docker container named '${CONTAINER_NAME}' exists and is running, creating it if necessary. Returns the container ID.`,
+		description: `Ensures the specific Docker container named '${CONTAINER_NAME}' exists and is running using the specified image, creating it if necessary. The container runs a background process to stay alive. Returns the container ID.`,
 		parameters: zodToGoogleGenAISchema(false, CreateContainerInputSchema),
 		response: zodToGoogleGenAISchema(false, CreateContainerOutputSchema),
 	},
 	{
 		name: "run-command-in-container",
-		description: `Executes a command inside the specific Docker container named '${CONTAINER_NAME}' and returns its output and exit code.`,
+		description: `Executes a command inside the specific Docker container named '${CONTAINER_NAME}' and returns its output and exit code. Optionally sets the working directory (defaults to '/').`,
 		parameters: zodToGoogleGenAISchema(false, RunCommandInputSchema),
 		response: zodToGoogleGenAISchema(false, RunCommandOutputSchema),
 	},
