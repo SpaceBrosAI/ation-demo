@@ -1,9 +1,9 @@
-import { Writable } from "node:stream"; // Import Writable for type safety
+import { Writable, PassThrough } from "node:stream"; // Ensure PassThrough is imported
 
 import { z } from "zod";
 import { zodToGoogleGenAISchema } from "../utils/google-genai-schema";
 import type { FunctionDeclaration } from "@google/genai";
-import type Docker from "dockerode"; // Import Dockerode types if needed
+import type Docker from "dockerode"; // Ensure Dockerode types are available if needed
 
 import { docker } from "../docker";
 import { hatchet } from "../hatchet";
@@ -25,10 +25,6 @@ const CreateContainerInputSchema = z.object({
 });
 const CreateContainerOutputSchema = z.object({
 	containerId: z.string().describe("The ID of the created container."),
-	warnings: z
-		.array(z.string())
-		.optional()
-		.describe("Any warnings returned by Docker."),
 });
 
 // Schema for running a command in a container
@@ -85,65 +81,39 @@ export const createContainer = hatchet.task<
 	name: "create-docker-container",
 	fn: async (input) => {
 		try {
-			// Check if container already exists
-			let existingContainer: Docker.Container | null = null;
+			let container: Docker.Container;
 			try {
-				existingContainer = docker.getContainer(CONTAINER_NAME);
-				const inspectInfo = await existingContainer.inspect();
-				console.log(
-					`Container '${CONTAINER_NAME}' already exists with ID: ${inspectInfo.Id}`,
-				);
-				// Optionally start if not running?
-				if (!inspectInfo.State.Running) {
-					console.log(`Starting existing container '${CONTAINER_NAME}'...`);
-					await existingContainer.start();
+				container = docker.getContainer(CONTAINER_NAME);
+				const info = await container.inspect();
+				if (!info.State.Running) {
+					await container.start();
 				}
-				return {
-					containerId: inspectInfo.Id,
-				};
-			} catch (error: unknown) {
-				// If container not found (404), proceed to create
+				return { containerId: info.Id };
+			} catch (err: unknown) {
 				if (
-					!(
-						typeof error === "object" &&
-						error !== null &&
-						"statusCode" in error &&
-						(error as { statusCode?: number }).statusCode === 404
-					)
+					typeof err === "object" &&
+					err !== null &&
+					"statusCode" in err &&
+					typeof err.statusCode === "number" &&
+					err.statusCode === 404
 				) {
-					throw error; // Re-throw unexpected errors during inspection
+					// not found, proceed to create
+				} else {
+					throw err;
 				}
-				// Container doesn't exist, ignore the 404 and proceed
-				console.log(`Container '${CONTAINER_NAME}' not found, creating...`);
 			}
-
-			// Create the container if it didn't exist
-			const container = await docker.createContainer({
+			container = await docker.createContainer({
 				Image: input.image,
-				Cmd: ["tail", "-f", "/dev/null"], // Keep container running
-				name: CONTAINER_NAME, // Use the fixed name
-				HostConfig: input.hostConfig as Docker.HostConfig, // Cast needed as Zod schema is generic
-				AttachStdout: true, // Required for logs/exec
-				AttachStderr: true, // Required for logs/exec
-				OpenStdin: false,
-				Tty: false, // Generally false for non-interactive execs
+				name: CONTAINER_NAME,
+				Cmd: ["tail", "-f", "/dev/null"],
+				HostConfig: input.hostConfig as Docker.HostConfig,
 			});
-			await container.start(); // Start the container immediately after creation
-			console.log(
-				`Container '${CONTAINER_NAME}' created and started with ID: ${container.id}`,
-			);
-			return {
-				containerId: container.id,
-				// Dockerode createContainer response might have Warnings
-				// warnings: (container as any).Warnings, // Adjust if needed based on actual response
-			};
+			await container.start();
+			const id = container.id;
+			return { containerId: id };
 		} catch (error: unknown) {
-			// Use unknown instead of any for create error
-			console.error("Error in createContainer task:", error);
-			const message = error instanceof Error ? error.message : String(error);
-			throw new Error(
-				`Failed to ensure container '${CONTAINER_NAME}' exists: ${message}`,
-			);
+			const msg = error instanceof Error ? error.message : String(error);
+			throw new Error(`Failed to create container '${CONTAINER_NAME}': ${msg}`);
 		}
 	},
 });
@@ -153,142 +123,45 @@ export const runCommandInContainer = hatchet.task<
 	z.infer<typeof RunCommandOutputSchema>
 >({
 	name: "run-command-in-container",
-	fn: async (input): Promise<z.infer<typeof RunCommandOutputSchema>> => {
-		try {
-			const container = docker.getContainer(CONTAINER_NAME); // Use fixed name
-			// Ensure container exists before trying to exec
-			try {
-				await container.inspect();
-			} catch (error: unknown) {
-				if (
-					typeof error === "object" &&
-					error !== null &&
-					"statusCode" in error &&
-					(error as { statusCode?: number }).statusCode === 404
-				) {
-					throw new Error(
-						`Container '${CONTAINER_NAME}' does not exist. Please create it first.`,
-					);
-				}
-				throw error; // Re-throw other inspection errors
-			}
-
-			const exec = await container.exec({
-				Cmd: input.cmd,
-				WorkingDir: input.workingDir ?? "/",
-				AttachStdout: input.attachStdout,
-				AttachStderr: input.attachStderr,
-				Tty: input.tty,
-			});
-
-			// Start the exec process and get the stream
-			const stream = await exec.start({
-				hijack: true,
-				stdin: false,
-				Tty: input.tty,
-			});
-
-			// Collect output
-			let stdout = "";
-			let stderr = "";
-
-			// docker.modem.demuxStream is needed to separate stdout and stderr
-			// If Tty is true, the stream is not multiplexed.
-			if (input.tty) {
-				// For TTY streams, all output comes to stdout
-				stdout = await new Promise((resolve, reject) => {
-					let output = "";
-					stream.on("data", (chunk) => {
-						output += chunk.toString("utf8");
-					});
-					stream.on("end", () => resolve(output));
-					stream.on("error", reject);
-				});
-			} else {
-				// For non-TTY streams, demux stdout and stderr
-				const outputs = await new Promise<{ stdout: string; stderr: string }>(
-					(resolve, reject) => {
-						let stdoutData = "";
-						let stderrData = "";
-
-						// Create simple Writable streams to capture output
-						const stdoutStream = new Writable({
-							write(chunk, encoding, callback) {
-								stdoutData += chunk.toString("utf8");
-								callback();
-							},
-						});
-						const stderrStream = new Writable({
-							write(chunk, encoding, callback) {
-								stderrData += chunk.toString("utf8");
-								callback();
-							},
-						});
-
-						docker.modem.demuxStream(stream, stdoutStream, stderrStream);
-
-						// Handle stream events
-						stream.on("end", () => {
-							// Ensure writable streams are finished before resolving
-							stdoutStream.end();
-							stderrStream.end(() => {
-								resolve({ stdout: stdoutData, stderr: stderrData });
-							});
-						});
-						stream.on("error", (err) => {
-							stdoutStream.end();
-							stderrStream.end(() => {
-								reject(err);
-							});
-						});
-					},
-				);
-				stdout = outputs.stdout;
-				stderr = outputs.stderr;
-			}
-
-			// Get exit code after stream has ended
-			const inspectResult = await exec.inspect();
-			const exitCode = inspectResult.ExitCode;
-
-			return { stdout, stderr, exitCode };
-		} catch (error: unknown) {
-			// Use unknown instead of any
-			console.error("Error running command in container:", error);
-			// Type check for Docker API error structure more safely
-			let errorMessage = "Unknown error";
-			let statusCode: number | string = "N/A";
-
-			if (typeof error === "object" && error !== null) {
-				const potentialError = error as {
-					json?: { message?: string };
-					message?: string;
-					statusCode?: number | string;
-				};
-
-				if (
-					potentialError.json &&
-					typeof potentialError.json === "object" &&
-					potentialError.json.message
-				) {
-					errorMessage = potentialError.json.message;
-				} else if (potentialError.message) {
-					errorMessage = potentialError.message;
-				}
-
-				if (potentialError.statusCode !== undefined) {
-					statusCode = potentialError.statusCode;
-				}
-			}
-
-			// Provide specific error if container doesn't exist
-			if (statusCode === 404) {
-				errorMessage = `Container '${CONTAINER_NAME}' not found.`;
-			}
-			throw new Error(
-				`Failed to run command in container '${CONTAINER_NAME}' (Status: ${statusCode}): ${errorMessage}`,
+	fn: async (input) => {
+		const container = docker.getContainer(CONTAINER_NAME);
+		await container.inspect();
+		const execInst = await container.exec({
+			Cmd: input.cmd,
+			WorkingDir: input.workingDir ?? "/",
+			AttachStdout: input.attachStdout ?? true,
+			AttachStderr: input.attachStderr ?? true,
+			Tty: input.tty ?? false,
+		});
+		const stream = await execInst.start({
+			hijack: true,
+			stdin: false,
+			Tty: input.tty ?? false,
+		});
+		const stdoutBuffers: Buffer[] = [];
+		const stderrBuffers: Buffer[] = [];
+		if (input.tty) {
+			stream.on("data", (chunk) =>
+				stdoutBuffers.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
 			);
+		} else {
+			const stdoutStream = new PassThrough();
+			const stderrStream = new PassThrough();
+			docker.modem.demuxStream(stream, stdoutStream, stderrStream);
+			stdoutStream.on("data", (chunk) => stdoutBuffers.push(chunk));
+			stderrStream.on("data", (chunk) => stderrBuffers.push(chunk));
 		}
+		await new Promise<void>((resolve, reject) => {
+			stream.on("end", resolve);
+			stream.on("error", reject);
+		});
+		const inspectData = await execInst.inspect();
+		const exitCode = inspectData.ExitCode ?? null;
+		const stdout = Buffer.concat(stdoutBuffers).toString("utf8");
+		const stderr = input.tty
+			? ""
+			: Buffer.concat(stderrBuffers).toString("utf8");
+		return { stdout, stderr, exitCode };
 	},
 });
 
@@ -297,13 +170,14 @@ export const removeContainer = hatchet.task<
 	z.infer<typeof RemoveContainerOutputSchema>
 >({
 	name: "remove-docker-container",
-	fn: async (input) => {
+	fn: async (input): Promise<z.infer<typeof RemoveContainerOutputSchema>> => {
+		// Added explicit Promise return type
 		try {
 			const container = docker.getContainer(CONTAINER_NAME); // Use fixed name
 			console.log(`Attempting to remove container '${CONTAINER_NAME}'...`);
 			await container.remove({
 				force: input.force,
-				v: input.removeVolumes, // 'v' corresponds to removeVolumes
+				v: input.removeVolumes, // 'v' corresponds to removeVolumes in Docker API
 			});
 			console.log(`Container '${CONTAINER_NAME}' removed successfully.`);
 			return { success: true };
@@ -317,10 +191,14 @@ export const removeContainer = hatchet.task<
 				(error as { statusCode?: number }).statusCode === 404
 			) {
 				console.warn(`Container '${CONTAINER_NAME}' not found for removal.`);
+				// Even if not found, the desired state (container removed) is achieved, arguably.
+				// Depending on desired semantics, you might return true or a specific status.
+				// Returning false as it wasn't *actively* removed by this call.
 				return { success: false }; // Indicate container wasn't found
 			}
 			console.error("Error removing container:", error);
 			const message = error instanceof Error ? error.message : String(error);
+			// Throw a new error, fulfilling the function's need to either return or throw
 			throw new Error(
 				`Failed to remove container '${CONTAINER_NAME}': ${message}`,
 			);
